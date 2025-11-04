@@ -21,30 +21,28 @@ import com.alibaba.cloud.ai.graph.action.AsyncNodeActionWithConfig;
 import com.alibaba.cloud.ai.graph.action.Command;
 import com.alibaba.cloud.ai.graph.action.CommandAction;
 import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
-import com.alibaba.cloud.ai.graph.checkpoint.constant.SaverEnum;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
+import com.alibaba.cloud.ai.graph.streaming.GraphFlux;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.logging.LogManager;
-
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import static com.alibaba.cloud.ai.graph.StateGraph.END;
 import static com.alibaba.cloud.ai.graph.StateGraph.START;
 import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertIterableEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class SubGraphTest {
 
@@ -239,7 +237,7 @@ public class SubGraphTest {
 		var B_B2 = SubGraphNode.formatId("B", "B2");
 		var B_C = SubGraphNode.formatId("B", "C");
 
-		SaverConfig saver = SaverConfig.builder().register(SaverEnum.MEMORY.getValue(), new MemorySaver()).build();
+		SaverConfig saver = SaverConfig.builder().register(new MemorySaver()).build();
 
 		var withSaver = workflowParent.compile(CompileConfig.builder().saverConfig(saver).build());
 
@@ -248,7 +246,8 @@ public class SubGraphTest {
 		// INTERRUPT AFTER B1
 		CompileConfig compileConfig = CompileConfig.builder().saverConfig(saver).interruptAfter(B_B1).build();
 		var interruptAfterB1 = workflowParent.compile(compileConfig);
-		assertIterableEquals(List.of(START, "A", B_B1), _execute(interruptAfterB1, Map.of()));
+		//The last B_B1 node is duplicated because an InterruptionMetadata NodeOutput is emitted after the edge evaluation of node B_B1.
+		assertIterableEquals(List.of(START, "A", B_B1, B_B1), _execute(interruptAfterB1, Map.of()));
 
 		// RESUME AFTER B1
 		assertIterableEquals(List.of(B_B2, B_C, "C", END), _resume(interruptAfterB1, null));
@@ -257,7 +256,8 @@ public class SubGraphTest {
 		var interruptAfterB2 = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptAfter(B_B2).build());
 
-		assertIterableEquals(List.of(START, "A", B_B1, B_B2), _execute(interruptAfterB2, Map.of()));
+		//The last B_B2 node is duplicated because an InterruptionMetadata NodeOutput is emitted after the edge evaluation of node B_B2.
+		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_B2), _execute(interruptAfterB2, Map.of()));
 
 		// RESUME AFTER B2
 		assertIterableEquals(List.of(B_C, "C", END), _resume(interruptAfterB2, null));
@@ -266,7 +266,7 @@ public class SubGraphTest {
 		var interruptBeforeC = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptBefore("C").build());
 
-		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_C), _execute(interruptBeforeC, Map.of()));
+		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_C, B_C), _execute(interruptBeforeC, Map.of()));
 
 		// RESUME AFTER B2
 		assertIterableEquals(List.of("C", END), _resume(interruptBeforeC, null));
@@ -274,7 +274,7 @@ public class SubGraphTest {
 		// INTERRUPT BEFORE SUBGRAPH B
 		var interruptBeforeSubgraphB = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptBefore("B").build());
-		assertIterableEquals(List.of(START, "A"), _execute(interruptBeforeSubgraphB, Map.of()));
+		assertIterableEquals(List.of(START, "A", "A"), _execute(interruptBeforeSubgraphB, Map.of()));
 
 		// RESUME AFTER SUBGRAPH B
 		assertIterableEquals(List.of(B_B1, B_B2, B_C, "C", END), _resume(interruptBeforeSubgraphB, null));
@@ -354,7 +354,7 @@ public class SubGraphTest {
 		var B_B2 = SubGraphNode.formatId("B", "B2");
 		var B_C = SubGraphNode.formatId("B", "C");
 
-		SaverConfig saver = SaverConfig.builder().register(SaverEnum.MEMORY.getValue(), new MemorySaver()).build();
+		SaverConfig saver = SaverConfig.builder().register(new MemorySaver()).build();
 
 		var withSaver = workflowParent.compile(CompileConfig.builder().saverConfig(saver).build());
 
@@ -363,7 +363,7 @@ public class SubGraphTest {
 		// INTERRUPT AFTER B1
 		var interruptAfterB1 = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptAfter(B_B1).build());
-		assertIterableEquals(List.of(START, "A", B_B1), _execute(interruptAfterB1, Map.of()));
+		assertIterableEquals(List.of(START, "A", B_B1, B_B1), _execute(interruptAfterB1, Map.of()));
 
 		// RESUME AFTER B1
 		assertIterableEquals(List.of(B_B2, B_C, "C1", "C", END), _resume(interruptAfterB1, null));
@@ -372,7 +372,7 @@ public class SubGraphTest {
 		var interruptAfterB2 = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptAfter(B_B2).build());
 
-		assertIterableEquals(List.of(START, "A", B_B1, B_B2), _execute(interruptAfterB2, Map.of()));
+		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_B2), _execute(interruptAfterB2, Map.of()));
 
 		// RESUME AFTER B2
 		assertIterableEquals(List.of(B_C, "C1", "C", END), _resume(interruptAfterB2, null));
@@ -381,7 +381,7 @@ public class SubGraphTest {
 		var interruptBeforeC = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptBefore("C").build());
 
-		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_C, "C1"), _execute(interruptBeforeC, Map.of()));
+		assertIterableEquals(List.of(START, "A", B_B1, B_B2, B_C, "C1", "C1"), _execute(interruptBeforeC, Map.of()));
 
 		// RESUME BEFORE C
 		assertIterableEquals(List.of("C", END), _resume(interruptBeforeC, null));
@@ -389,7 +389,7 @@ public class SubGraphTest {
 		// INTERRUPT BEFORE SUBGRAPH B
 		var interruptBeforeB = workflowParent
 			.compile(CompileConfig.builder().saverConfig(saver).interruptBefore("B").build());
-		assertIterableEquals(List.of(START, "A"), _execute(interruptBeforeB, Map.of()));
+		assertIterableEquals(List.of(START, "A", "A"), _execute(interruptBeforeB, Map.of()));
 
 		// RESUME BEFORE SUBGRAPH B
 		assertIterableEquals(List.of(B_B1, B_B2, B_C, "C1", "C", END), _resume(interruptBeforeB, null));
@@ -408,7 +408,7 @@ public class SubGraphTest {
 	@Test
 	public void testCheckpointWithSubgraph() throws Exception {
 
-		SaverConfig saver = SaverConfig.builder().register(SaverEnum.MEMORY.getValue(), new MemorySaver()).build();
+		SaverConfig saver = SaverConfig.builder().register(new MemorySaver()).build();
 
 		var compileConfig = CompileConfig.builder().saverConfig(saver).build();
 		var workflowChild = new StateGraph().addNode("step_1", _makeNode("child:step1"))
@@ -447,7 +447,7 @@ public class SubGraphTest {
 	 */
 	@Test
 	public void testOtherCreateSubgraph2() throws Exception {
-		SaverConfig saver = SaverConfig.builder().register(SaverEnum.MEMORY.getValue(), new MemorySaver()).build();
+		SaverConfig saver = SaverConfig.builder().register(new MemorySaver()).build();
 
 		var compileConfig = CompileConfig.builder().saverConfig(saver).build();
 		var workflowChild = new StateGraph(createKeyStrategyFactory()).addNode("step_1", _makeNode("child:step1"))
@@ -536,7 +536,7 @@ public class SubGraphTest {
 
 	@Test
 	public void testNestedSubgraph() throws Exception {
-		SaverConfig saver = SaverConfig.builder().register(SaverEnum.MEMORY.getValue(), new MemorySaver()).build();
+		SaverConfig saver = SaverConfig.builder().register(new MemorySaver()).build();
 
 		var compileConfig = CompileConfig.builder().saverConfig(saver).build();
 
@@ -576,6 +576,62 @@ public class SubGraphTest {
 			.block();
 
 		assertNotNull(result);
+	}
+
+
+	@Test
+	public void testParallelSubgraph() throws Exception {
+
+		SaverConfig saver = SaverConfig.builder().register( new MemorySaver()).build();
+
+		var compileConfig = CompileConfig.builder().saverConfig(saver).build();
+
+        StateGraph childGraph1 = new StateGraph(() -> {
+            HashMap<String, KeyStrategy> stringKeyStrategyHashMap = new HashMap<>();
+            stringKeyStrategyHashMap.put("messages", new AppendStrategy());
+            return stringKeyStrategyHashMap;
+        }).addNode("sub1_node1", _makeNode("node1"))
+                .addNode("sub1_node2", _makeNode("node2"))
+                .addEdge(START, "sub1_node1")
+                .addEdge(START, "sub1_node2")
+                .addEdge("sub1_node1", END)
+                .addEdge("sub1_node2", END);
+
+        StateGraph childGraph2 = new StateGraph(() -> {
+            HashMap<String, KeyStrategy> stringKeyStrategyHashMap = new HashMap<>();
+            stringKeyStrategyHashMap.put("messages", new AppendStrategy());
+            return stringKeyStrategyHashMap;
+        }).addNode("node1", _makeNode("node1"))
+                .addNode("node2", _makeNode("node2"))
+                .addEdge(START, "node1")
+                .addEdge(START, "node2")
+                .addEdge("node1", END)
+                .addEdge("node2", END);
+
+        StateGraph parentGraph = new StateGraph(() -> {
+            HashMap<String, KeyStrategy> stringKeyStrategyHashMap = new HashMap<>();
+            stringKeyStrategyHashMap.put("messages", new AppendStrategy());
+            return stringKeyStrategyHashMap;
+        }).addNode("node1", AsyncNodeActionWithConfig.node_async((state, config) -> {
+                    CompiledGraph compile = childGraph1.compile(compileConfig);
+                    Flux<NodeOutput> nodeOutputFlux = compile.stream(state.data(), config);
+                    return Map.of("messages", GraphFlux.of("node1", "messages", nodeOutputFlux, nodeOutput -> nodeOutput, (Function<NodeOutput, String>) nodeOutput -> nodeOutput.toString()));
+                }))
+                .addNode("node2", AsyncNodeActionWithConfig.node_async((state, config) -> {
+                    CompiledGraph compile = childGraph2.compile(compileConfig);
+                    Flux<NodeOutput> nodeOutputFlux = compile.stream(state.data(), config);
+                    return Map.of("messages", GraphFlux.of("node2", "messages", nodeOutputFlux, nodeOutput -> nodeOutput, (Function<NodeOutput, String>) nodeOutput -> nodeOutput.toString()));
+                }))
+                .addEdge(START, "node1")
+                .addEdge(START, "node2")
+                .addEdge("node1", END)
+                .addEdge("node2", END);
+        CompiledGraph compile = parentGraph.compile(compileConfig);
+        Flux<NodeOutput> stream = compile.stream(Map.of());
+        stream.doOnNext(n -> log.info("{}", n))
+                .reduce((a, b) -> b)
+                .map(NodeOutput::state)
+                .block();
 	}
 
 }
