@@ -102,7 +102,7 @@ public class GraphRunnerContext {
 			this.config = RunnableConfig.builder(config)
 					.checkPointId(null) // Reset checkpoint id
 					.clearContext()
-					.addMetadata(action.resumeSubGraphId(), true) // add metadata for
+					.addMetadata(action.getResumeSubGraphId(), true) // add metadata for
 					// sub graph
 					.build();
 		} else {
@@ -287,6 +287,14 @@ public class GraphRunnerContext {
 	public StreamingOutput<?> buildStreamingOutput(Message message, String nodeId) {
 		// Create StreamingOutput with chunk only
 		StreamingOutput<?> output = new StreamingOutput<>(message, nodeId, (String) config.metadata("_AGENT_").orElse(""),
+				this.overallState);
+		output.setSubGraph(true);
+		return output;
+	}
+
+	public StreamingOutput<?> buildStreamingOutput(Object originData, String nodeId) {
+		// Create StreamingOutput with chunk only
+		StreamingOutput<?> output = new StreamingOutput<>(originData, nodeId, (String) config.metadata("_AGENT_").orElse(""),
 				this.overallState);
 		output.setSubGraph(true);
 		return output;

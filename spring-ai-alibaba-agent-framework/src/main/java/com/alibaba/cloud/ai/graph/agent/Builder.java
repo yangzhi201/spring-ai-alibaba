@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 import com.alibaba.cloud.ai.graph.CompileConfig;
 import com.alibaba.cloud.ai.graph.KeyStrategy;
@@ -80,6 +81,8 @@ public abstract class Builder {
 
 	protected BaseCheckpointSaver saver;
 
+	protected CompileConfig compileConfig;
+
 	protected List<Hook> hooks = new ArrayList<>();
 	protected List<Interceptor> interceptors = new ArrayList<>();
 	protected List<ModelInterceptor> modelInterceptors = new ArrayList<>();
@@ -107,6 +110,8 @@ public abstract class Builder {
 	protected boolean enableLogging;
 
 	protected StateSerializer stateSerializer;
+	
+	protected Executor executor;
 
 	public Builder name(String name) {
 		this.name = name;
@@ -188,7 +193,14 @@ public abstract class Builder {
 	}
 
 	public Builder saver(BaseCheckpointSaver saver) {
+		Assert.notNull(saver, "saver cannot be null");
 		this.saver = saver;
+		return this;
+	}
+
+	public Builder compileConfig(CompileConfig compileConfig) {
+		Assert.notNull(compileConfig, "compileConfig cannot be null");
+		this.compileConfig = compileConfig;
 		return this;
 	}
 
@@ -318,7 +330,26 @@ public abstract class Builder {
 		return this;
 	}
 
+	/**
+	 * Sets the executor for parallel nodes.
+	 * <p>
+	 * This executor will be used for all parallel nodes in the agent's execution graph.
+	 * When a parallel node is executed, it will use this executor to run the parallel
+	 * branches concurrently.
+	 * @param executor the {@link Executor} to use for parallel nodes
+	 * @return this builder instance
+	 */
+	public Builder executor(Executor executor) {
+		Assert.notNull(executor, "executor cannot be null");
+		this.executor = executor;
+		return this;
+	}
+
 	protected CompileConfig buildConfig() {
+		if (compileConfig != null) {
+			return compileConfig;
+		}
+
 		SaverConfig saverConfig = SaverConfig.builder()
 				.register(saver)
 				.build();

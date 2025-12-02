@@ -20,6 +20,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.serializer.Serializer;
 import com.alibaba.cloud.ai.graph.serializer.plain_text.PlainTextStateSerializer;
 import com.alibaba.cloud.ai.graph.state.AgentStateFactory;
+import org.springframework.ai.chat.model.ChatResponse;
 
 import java.io.IOException;
 import java.io.ObjectInput;
@@ -32,8 +33,10 @@ import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.PropertyAccessor;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 /**
  * Base Implementation of {@link PlainTextStateSerializer} using Jackson library. Need to
@@ -47,20 +50,25 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 
 	protected JacksonStateSerializer(AgentStateFactory<OverAllState> stateFactory) {
 		this(stateFactory, new ObjectMapper());
-		this.objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
-
 	}
 
 	protected JacksonStateSerializer(AgentStateFactory<OverAllState> stateFactory, ObjectMapper objectMapper) {
 		super(stateFactory);
 		this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper cannot be null");
+		this.objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
 
 		this.objectMapper.registerModule(new Jdk8Module());
+		this.objectMapper.registerModule(new JavaTimeModule());
 		this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.USE_BIG_INTEGER_FOR_INTS,
 				false);
 		this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS,
 				false);
 		this.objectMapper.configure(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true);
+
+		objectMapper.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+		objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+//		objectMapper.registerModule(new ParameterNamesModule());
+		objectMapper.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY);
 
 		var module = new SimpleModule();
 		module.addDeserializer(Map.class, new GenericMapDeserializer(typeMapper));
@@ -114,7 +122,7 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 
 	/**
 	 * Normalize a single value for serialization.
-	 * Only transforms GraphResponse and CompletableFuture, recursively checks containers.
+	 * Only transforms GraphResponse, ChatResponse and CompletableFuture, recursively checks containers.
 	 */
 	private Object normalizeValue(Object value) {
 		if (value == null) {
@@ -126,12 +134,17 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 			return normalizeGraphResponse((GraphResponse<?>) value);
 		}
 
-		// 2. CompletableFuture → snapshot map (fully normalize internally)
+		// 2. ChatResponse → snapshot map (fully normalize internally)
+		if (value instanceof ChatResponse) {
+			return normalizeChatResponse((ChatResponse) value);
+		}
+
+		// 3. CompletableFuture → snapshot map (fully normalize internally)
 		if (value instanceof CompletableFuture) {
 			return normalizeCompletableFuture((CompletableFuture<?>) value);
 		}
 
-		// 3. Map → shallow scan for GraphResponse/CompletableFuture
+		// 4. Map → shallow scan for GraphResponse/ChatResponse/CompletableFuture
 		if (value instanceof Map) {
 			Map<?, ?> map = (Map<?, ?>) value;
 			Map<Object, Object> result = new LinkedHashMap<>(map.size());
@@ -146,7 +159,7 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 			return changed ? result : value;
 		}
 
-		// 4. Collection → shallow scan for GraphResponse/CompletableFuture
+		// 5. Collection → shallow scan for GraphResponse/ChatResponse/CompletableFuture
 		if (value instanceof Collection) {
 			Collection<?> collection = (Collection<?>) value;
 			List<Object> result = new ArrayList<>(collection.size());
@@ -161,17 +174,17 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 			return changed ? result : value;
 		}
 
-	// 5. Array → shallow scan for GraphResponse/CompletableFuture
+	// 6. Array → shallow scan for GraphResponse/ChatResponse/CompletableFuture
 	if (value.getClass().isArray()) {
 		// Check if it's a primitive array (int[], double[], etc.)
 		Class<?> componentType = value.getClass().getComponentType();
 		if (componentType.isPrimitive()) {
-			// Primitive arrays cannot contain GraphResponse/CompletableFuture
+			// Primitive arrays cannot contain GraphResponse/ChatResponse/CompletableFuture
 			// Return as-is, let Jackson handle the serialization
 			return value;
 		}
 		
-		// Object array - check for GraphResponse/CompletableFuture
+		// Object array - check for GraphResponse/ChatResponse/CompletableFuture
 		Object[] array = (Object[]) value;
 		Object[] result = new Object[array.length];
 		boolean changed = false;
@@ -186,7 +199,7 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 		return changed ? result : value;
 	}
 
-		// 6. Optional → unwrap and check
+	// 7. Optional → unwrap and check
 		if (value instanceof Optional) {
 			Optional<?> opt = (Optional<?>) value;
 			if (opt.isEmpty()) {
@@ -248,7 +261,31 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 	}
 
 	/**
-	 * Deep normalize a value (for use inside GraphResponse/CompletableFuture).
+	 * Convert ChatResponse into serializable snapshot map with type marker.
+	 */
+	private Map<String, Object> normalizeChatResponse(ChatResponse response) {
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("@type", "ChatResponse");
+		
+		// Normalize result (Generation list)
+		if (response.getResult() != null) {
+			snapshot.put("result", deepNormalizeValue(response.getResult()));
+		} else {
+			snapshot.put("result", null);
+		}
+		
+		// Normalize metadata
+		if (response.getMetadata() != null) {
+			snapshot.put("metadata", deepNormalizeValue(response.getMetadata()));
+		} else {
+			snapshot.put("metadata", null);
+		}
+		
+		return snapshot;
+	}
+
+	/**
+	 * Deep normalize a value (for use inside GraphResponse/ChatResponse/CompletableFuture).
 	 * Recursively normalizes all containers.
 	 */
 	private Object deepNormalizeValue(Object value) {
@@ -261,12 +298,17 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 			return normalizeGraphResponse((GraphResponse<?>) value);
 		}
 
-		// 2. CompletableFuture → snapshot map
+		// 2. ChatResponse → snapshot map
+		if (value instanceof ChatResponse) {
+			return normalizeChatResponse((ChatResponse) value);
+		}
+
+		// 3. CompletableFuture → snapshot map
 		if (value instanceof CompletableFuture) {
 			return normalizeCompletableFuture((CompletableFuture<?>) value);
 		}
 
-		// 3. Map → recursive normalization
+		// 4. Map → recursive normalization
 		if (value instanceof Map) {
 			Map<?, ?> map = (Map<?, ?>) value;
 			Map<Object, Object> normalized = new LinkedHashMap<>(map.size());
@@ -274,13 +316,13 @@ public abstract class JacksonStateSerializer extends PlainTextStateSerializer {
 			return normalized;
 		}
 
-		// 4. Collection → recursive normalization
+		// 5. Collection → recursive normalization
 		if (value instanceof Collection) {
 			Collection<?> collection = (Collection<?>) value;
 			return collection.stream().map(this::deepNormalizeValue).collect(Collectors.toList());
 		}
 
-	// 5. Array → recursive normalization
+	// 6. Array → recursive normalization
 	if (value.getClass().isArray()) {
 		// Check if it's a primitive array
 		Class<?> componentType = value.getClass().getComponentType();
