@@ -15,14 +15,14 @@
  */
 package com.alibaba.cloud.ai.graph.agent.hook.summarization;
 
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.hook.HookPosition;
 import com.alibaba.cloud.ai.graph.agent.hook.HookPositions;
 import com.alibaba.cloud.ai.graph.agent.hook.JumpTo;
-import com.alibaba.cloud.ai.graph.agent.hook.ModelHook;
 import com.alibaba.cloud.ai.graph.agent.hook.TokenCounter;
-import com.alibaba.cloud.ai.graph.state.RemoveByHash;
+import com.alibaba.cloud.ai.graph.agent.hook.messages.AgentCommand;
+import com.alibaba.cloud.ai.graph.agent.hook.messages.UpdatePolicy;
+import com.alibaba.cloud.ai.graph.agent.hook.messages.MessagesModelHook;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -33,10 +33,9 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,7 +55,7 @@ import org.slf4j.LoggerFactory;
  *     .build();
  */
 @HookPositions({HookPosition.BEFORE_MODEL})
-public class SummarizationHook extends ModelHook {
+public class SummarizationHook extends MessagesModelHook {
 
 	private static final Logger log = LoggerFactory.getLogger(SummarizationHook.class);
 
@@ -74,6 +73,7 @@ public class SummarizationHook extends ModelHook {
 
 	private static final String SUMMARY_PREFIX = "## Previous conversation summary:";
 	private static final int DEFAULT_MESSAGES_TO_KEEP = 20;
+	private static final int SEARCH_RANGE_FOR_TOOL_PAIRS = 5;
 
 	private final ChatModel model;
 	private final Integer maxTokensBeforeSummary;
@@ -96,64 +96,136 @@ public class SummarizationHook extends ModelHook {
 	}
 
 	@Override
-	public CompletableFuture<Map<String, Object>> beforeModel(OverAllState state, RunnableConfig config) {
-		List<Message> messages = (List<Message>) state.value("messages").orElse(List.of());
-
+	public AgentCommand beforeModel(List<Message> previousMessages, RunnableConfig config) {
 		if (maxTokensBeforeSummary == null) {
-			return CompletableFuture.completedFuture(Map.of());
+			return new AgentCommand(previousMessages);
 		}
 
-		int totalTokens = tokenCounter.countTokens(messages);
+		int totalTokens = tokenCounter.countTokens(previousMessages);
 
 		if (totalTokens < maxTokensBeforeSummary) {
-			return CompletableFuture.completedFuture(Map.of());
+			return new AgentCommand(previousMessages);
 		}
 
 		log.info("Token count {} exceeds threshold {}, triggering summarization",
 				totalTokens, maxTokensBeforeSummary);
 
-		int cutoffIndex = findSafeCutoff(messages);
+		int cutoffIndex = findSafeCutoff(previousMessages);
 
 		if (cutoffIndex <= 0) {
 			log.warn("Cannot find safe cutoff point for summarization");
-			return CompletableFuture.completedFuture(Map.of());
+			return new AgentCommand(previousMessages);
 		}
 
-		List<Message> toSummarize = messages.subList(0, cutoffIndex);
-		List<Message> toPreserve = messages.subList(cutoffIndex, messages.size());
+		List<Message> toSummarize = previousMessages.subList(0, cutoffIndex);
+		List<Message> toPreserve = previousMessages.subList(cutoffIndex, previousMessages.size());
 
 		String summary = createSummary(toSummarize);
 
-		List<Object> newMessages = new ArrayList<>();
+		List<Message> newMessages = new ArrayList<>();
 		newMessages.add(new UserMessage(
 				"Here is a summary of the conversation to date:\n\n" + summary));
-		// Convert toSummarize messages to RemoveByHash objects so we can remove them from state
-		for (Message msg : toSummarize) {
-			newMessages.add(RemoveByHash.of(msg));
-		}
-
-		Map<String, Object> updates = new HashMap<>();
-		updates.put("messages", newMessages);
+		// Add preserved messages
+		newMessages.addAll(toPreserve);
 
 		log.info("Summarized {} messages, keeping {} recent messages",
 				toSummarize.size(), toPreserve.size());
 
-		return CompletableFuture.completedFuture(updates);
+		return new AgentCommand(newMessages, UpdatePolicy.REPLACE);
 	}
 
+	/**
+	 * Find safe cutoff point that preserves AI/Tool message pairs.
+	 *
+	 * Returns the index where messages can be safely cut without separating
+	 * related AI and Tool messages. Returns 0 if no safe cutoff is found.
+	 */
 	private int findSafeCutoff(List<Message> messages) {
-		// Find a safe cutoff point, preserving recent messages
-		int targetCutoff = Math.max(0, messages.size() - messagesToKeep);
+		if (messages.size() <= messagesToKeep) {
+			return 0;
+		}
 
-		// Ensure we don't split AI/Tool message pairs
-		for (int i = targetCutoff; i < messages.size(); i++) {
-			Message msg = messages.get(i);
-			if (msg instanceof UserMessage) {
+		int targetCutoff = messages.size() - messagesToKeep;
+
+		// Search backwards from targetCutoff to find a safe cutoff point
+		for (int i = targetCutoff; i >= 0; i--) {
+			if (isSafeCutoffPoint(messages, i)) {
 				return i;
 			}
 		}
 
-		return targetCutoff;
+		return 0;
+	}
+
+	/**
+	 * Check if cutting at index would separate AI/Tool message pairs.
+	 */
+	private boolean isSafeCutoffPoint(List<Message> messages, int cutoffIndex) {
+		if (cutoffIndex >= messages.size()) {
+			return true;
+		}
+
+		int searchStart = Math.max(0, cutoffIndex - SEARCH_RANGE_FOR_TOOL_PAIRS);
+		int searchEnd = Math.min(messages.size(), cutoffIndex + SEARCH_RANGE_FOR_TOOL_PAIRS);
+
+		for (int i = searchStart; i < searchEnd; i++) {
+			if (!hasToolCalls(messages.get(i))) {
+				continue;
+			}
+
+			AssistantMessage aiMessage = (AssistantMessage) messages.get(i);
+			Set<String> toolCallIds = extractToolCallIds(aiMessage);
+			if (cutoffSeparatesToolPair(messages, i, cutoffIndex, toolCallIds)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Check if message is an AI message with tool calls.
+	 */
+	private boolean hasToolCalls(Message message) {
+		return message instanceof AssistantMessage assistantMessage && !assistantMessage.getToolCalls().isEmpty();
+	}
+
+	/**
+	 * Extract tool call IDs from an AI message.
+	 */
+	private Set<String> extractToolCallIds(AssistantMessage aiMessage) {
+		Set<String> toolCallIds = new HashSet<>();
+		for (AssistantMessage.ToolCall toolCall : aiMessage.getToolCalls()) {
+			String callId = toolCall.id();
+			toolCallIds.add(callId);
+		}
+		return toolCallIds;
+	}
+
+	/**
+	 * Check if cutoff separates an AI message from its corresponding tool messages.
+	 */
+	private boolean cutoffSeparatesToolPair(
+			List<Message> messages,
+			int aiMessageIndex,
+			int cutoffIndex,
+			Set<String> toolCallIds) {
+		for (int j = aiMessageIndex + 1; j < messages.size(); j++) {
+			Message message = messages.get(j);
+			if (message instanceof ToolResponseMessage toolResponseMessage) {
+				// Check if any response in this ToolResponseMessage matches our tool call IDs
+				for (ToolResponseMessage.ToolResponse response : toolResponseMessage.getResponses()) {
+					if (toolCallIds.contains(response.id())) {
+						boolean aiBeforeCutoff = aiMessageIndex < cutoffIndex;
+						boolean toolBeforeCutoff = j < cutoffIndex;
+						if (aiBeforeCutoff != toolBeforeCutoff) {
+							return true;
+						}
+					}
+				}
+			}
+		}
+		return false;
 	}
 
 	private String createSummary(List<Message> messages) {

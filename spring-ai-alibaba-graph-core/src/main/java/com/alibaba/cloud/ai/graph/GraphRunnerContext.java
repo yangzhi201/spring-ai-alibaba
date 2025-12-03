@@ -81,7 +81,7 @@ public class GraphRunnerContext {
 		this.compiledGraph = compiledGraph;
 		this.config = config;
 
-		if (config.metadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY).isPresent()) {
+		if (config.metadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY).isPresent() || config.checkPointId().isPresent()) {
 			initializeFromResume(initialState, config);
 		} else {
 			initializeFromStart(initialState, config);
@@ -102,7 +102,7 @@ public class GraphRunnerContext {
 			this.config = RunnableConfig.builder(config)
 					.checkPointId(null) // Reset checkpoint id
 					.clearContext()
-					.addMetadata(action.resumeSubGraphId(), true) // add metadata for
+					.addMetadata(action.getResumeSubGraphId(), true) // add metadata for
 					// sub graph
 					.build();
 		} else {
@@ -287,6 +287,14 @@ public class GraphRunnerContext {
 	public StreamingOutput<?> buildStreamingOutput(Message message, String nodeId) {
 		// Create StreamingOutput with chunk only
 		StreamingOutput<?> output = new StreamingOutput<>(message, nodeId, (String) config.metadata("_AGENT_").orElse(""),
+				this.overallState);
+		output.setSubGraph(true);
+		return output;
+	}
+
+	public StreamingOutput<?> buildStreamingOutput(Object originData, String nodeId) {
+		// Create StreamingOutput with chunk only
+		StreamingOutput<?> output = new StreamingOutput<>(originData, nodeId, (String) config.metadata("_AGENT_").orElse(""),
 				this.overallState);
 		output.setSubGraph(true);
 		return output;

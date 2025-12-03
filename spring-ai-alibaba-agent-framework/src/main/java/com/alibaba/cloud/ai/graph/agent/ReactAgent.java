@@ -34,6 +34,8 @@ import com.alibaba.cloud.ai.graph.agent.hook.AgentHook;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.HookPosition;
 import com.alibaba.cloud.ai.graph.agent.hook.JumpTo;
+import com.alibaba.cloud.ai.graph.agent.hook.messages.MessagesAgentHook;
+import com.alibaba.cloud.ai.graph.agent.hook.messages.MessagesModelHook;
 import com.alibaba.cloud.ai.graph.agent.hook.ModelHook;
 import com.alibaba.cloud.ai.graph.agent.hook.ToolInjection;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
@@ -92,7 +94,7 @@ public class ReactAgent extends BaseAgent {
 	private List<ToolInterceptor> toolInterceptors;
 
 	private String instruction;
-	
+
 	private StateSerializer stateSerializer;
 
     private final Boolean hasTools;
@@ -111,10 +113,13 @@ public class ReactAgent extends BaseAgent {
 		this.inputType = builder.inputType;
 		this.outputSchema = builder.outputSchema;
 		this.outputType = builder.outputType;
-		
+
 		// Set state serializer from builder, or use default
         // Default to Jackson serializer for better compatibility and features
         this.stateSerializer = Objects.requireNonNullElseGet(builder.stateSerializer, () -> new SpringAIJacksonStateSerializer(OverAllState::new));
+
+		// Set executor configuration from builder
+		this.executor = builder.executor;
 
 		// Set interceptors to nodes
 		if (this.modelInterceptors != null && !this.modelInterceptors.isEmpty()) {
@@ -190,11 +195,11 @@ public class ReactAgent extends BaseAgent {
 	}
 
 	@Override
-	public Node asNode(boolean includeContents, boolean returnReasoningContents, String outputKeyToParent) {
+	public Node asNode(boolean includeContents, boolean returnReasoningContents) {
 		if (this.compiledGraph == null) {
 			this.compiledGraph = getAndCompileGraph();
 		}
-		return new AgentSubGraphNode(this.name, includeContents, returnReasoningContents, outputKeyToParent, this.compiledGraph, this.instruction);
+		return new AgentSubGraphNode(this.name, includeContents, returnReasoningContents, this.compiledGraph, this.instruction);
 	}
 
 	@Override
@@ -234,6 +239,8 @@ public class ReactAgent extends BaseAgent {
 		for (Hook hook : beforeAgentHooks) {
 			if (hook instanceof AgentHook agentHook) {
 				graph.addNode(hook.getName() + ".before", agentHook::beforeAgent);
+			} else if (hook instanceof MessagesAgentHook messagesAgentHook) {
+				graph.addNode(hook.getName() + ".before", MessagesAgentHook.beforeAgentAction(messagesAgentHook));
 			}
 		}
 
@@ -241,6 +248,8 @@ public class ReactAgent extends BaseAgent {
 		for (Hook hook : afterAgentHooks) {
 			if (hook instanceof AgentHook agentHook) {
 				graph.addNode(hook.getName() + ".after", agentHook::afterAgent);
+			} else if (hook instanceof MessagesAgentHook messagesAgentHook) {
+				graph.addNode(hook.getName() + ".after", MessagesAgentHook.afterAgentAction(messagesAgentHook));
 			}
 		}
 
@@ -248,6 +257,8 @@ public class ReactAgent extends BaseAgent {
 		for (Hook hook : beforeModelHooks) {
 			if (hook instanceof ModelHook modelHook) {
 				graph.addNode(hook.getName() + ".beforeModel", modelHook::beforeModel);
+			} else if (hook instanceof MessagesModelHook messagesModelHook) {
+				graph.addNode(hook.getName() + ".beforeModel", MessagesModelHook.beforeModelAction(messagesModelHook));
 			}
 		}
 
@@ -259,6 +270,8 @@ public class ReactAgent extends BaseAgent {
 				} else {
 					graph.addNode(hook.getName() + ".afterModel", modelHook::afterModel);
 				}
+			} else if (hook instanceof MessagesModelHook messagesModelHook) {
+				graph.addNode(hook.getName() + ".afterModel", MessagesModelHook.afterModelAction(messagesModelHook));
 			}
 		}
 
@@ -344,18 +357,43 @@ public class ReactAgent extends BaseAgent {
 	/**
 	 * Filter hooks by their position based on @HookPositions annotation.
 	 * A hook will be included if its getHookPositions() contains the specified position.
+	 * If a hook implements Prioritized interface, it will be sorted by its order.
+	 * Hooks that don't implement Prioritized will maintain their original order.
 	 *
 	 * @param hooks the list of hooks to filter
 	 * @param position the position to filter by
 	 * @return list of hooks that should execute at the specified position
 	 */
 	private static List<Hook> filterHooksByPosition(List<? extends Hook> hooks, HookPosition position) {
-		return hooks.stream()
+		List<Hook> filtered = hooks.stream()
 				.filter(hook -> {
 					HookPosition[] positions = hook.getHookPositions();
 					return Arrays.asList(positions).contains(position);
 				})
 				.collect(Collectors.toList());
+		
+		// Separate hooks that implement Prioritized from those that don't
+		List<Hook> prioritizedHooks = new ArrayList<>();
+		List<Hook> nonPrioritizedHooks = new ArrayList<>();
+		
+		for (Hook hook : filtered) {
+			if (hook instanceof Prioritized) {
+				prioritizedHooks.add(hook);
+			} else {
+				nonPrioritizedHooks.add(hook);
+			}
+		}
+		
+		// Sort prioritized hooks by their order
+		prioritizedHooks.sort((h1, h2) -> Integer.compare(
+				((Prioritized) h1).getOrder(),
+				((Prioritized) h2).getOrder()));
+		
+		// Combine: prioritized hooks first (sorted), then non-prioritized hooks (original order)
+		List<Hook> result = new ArrayList<>(prioritizedHooks);
+		result.addAll(nonPrioritizedHooks);
+		
+		return result;
 	}
 
 	private static String determineEntryNode(
@@ -470,12 +508,12 @@ public class ReactAgent extends BaseAgent {
 			String modelDestination,
 			String endDestination) throws GraphStateException {
 		if (!hooks.isEmpty()) {
-			Hook last = hooks.get(hooks.size() - 1);
+			Hook first = hooks.get(0);
 			addHookEdge(graph,
-					defaultNext,
+					first.getName() + nameSuffix,
 					StateGraph.END,
 					modelDestination, endDestination,
-					last.canJumpTo());
+					first.canJumpTo());
 		}
 
 		for (int i = hooks.size() - 1; i > 0; i--) {
@@ -527,7 +565,15 @@ public class ReactAgent extends BaseAgent {
 
 		if (canJumpTo != null && !canJumpTo.isEmpty()) {
 			EdgeAction router = state -> {
-				JumpTo jumpTo = (JumpTo)state.value("jump_to").orElse(null);
+				Object jumpToValue = state.value("jump_to").orElse(null);
+				JumpTo jumpTo = null;
+				if (jumpToValue != null) {
+					if (jumpToValue instanceof JumpTo) {
+						jumpTo = (JumpTo) jumpToValue;
+					} else if (jumpToValue instanceof String) {
+						jumpTo = JumpTo.fromStringOrNull((String) jumpToValue);
+					}
+				}
 				return resolveJump(jumpTo, modelDestination, endDestination, defaultDestination);
 			};
 
@@ -695,15 +741,7 @@ public class ReactAgent extends BaseAgent {
 		llmNode.setInstruction(instruction);
 	}
 
-	public KeyStrategy getOutputKeyStrategy() {
-		return outputKeyStrategy;
-	}
-
-	public void setOutputKeyStrategy(KeyStrategy outputKeyStrategy) {
-		this.outputKeyStrategy = outputKeyStrategy;
-	}
-
-	public static class SubGraphNodeAdapter implements NodeActionWithConfig {
+	public class SubGraphNodeAdapter implements NodeActionWithConfig {
 
 		private boolean includeContents;
 
@@ -711,18 +749,15 @@ public class ReactAgent extends BaseAgent {
 
 		private String instruction;
 
-		private String outputKeyToParent;
-
 		private CompiledGraph childGraph;
 
 		private CompileConfig parentCompileConfig;
 
-		public SubGraphNodeAdapter(boolean includeContents, boolean returnReasoningContents, String outputKeyToParent,
+		public SubGraphNodeAdapter(boolean includeContents, boolean returnReasoningContents,
 				CompiledGraph childGraph, String instruction, CompileConfig parentCompileConfig) {
 			this.includeContents = includeContents;
 			this.returnReasoningContents = returnReasoningContents;
 			this.instruction = instruction;
-			this.outputKeyToParent = outputKeyToParent;
 			this.childGraph = childGraph;
 			this.parentCompileConfig = parentCompileConfig;
 		}
@@ -756,7 +791,8 @@ public class ReactAgent extends BaseAgent {
 
 			Map<String, Object> result = new HashMap<>();
 
-			result.put(StringUtils.hasLength(this.outputKeyToParent) ? this.outputKeyToParent : "messages", getGraphResponseFlux(parentState, subGraphResult));
+			String outputKeyToParent = StringUtils.hasLength(ReactAgent.this.outputKey) ? ReactAgent.this.outputKey : "messages";
+			result.put(outputKeyToParent, getGraphResponseFlux(parentState, subGraphResult));
 			if (parentMessages != null) {
 				result.put("messages", parentMessages);
 			}
@@ -851,19 +887,24 @@ public class ReactAgent extends BaseAgent {
 	/**
 	 * Internal class that adapts a ReactAgent to be used as a SubGraph Node.
 	 */
-	private static class AgentSubGraphNode extends Node implements SubGraphNode {
+	private class AgentSubGraphNode extends Node implements SubGraphNode {
 
 		private final CompiledGraph subGraph;
 
-		public AgentSubGraphNode(String id, boolean includeContents, boolean returnReasoningContents, String outputKeyToParent, CompiledGraph subGraph, String instruction) {
+		public AgentSubGraphNode(String id, boolean includeContents, boolean returnReasoningContents, CompiledGraph subGraph, String instruction) {
 			super(Objects.requireNonNull(id, "id cannot be null"),
-					(config) -> node_async(new SubGraphNodeAdapter(includeContents, returnReasoningContents, outputKeyToParent, subGraph, instruction, config)));
+					(config) -> node_async(new SubGraphNodeAdapter(includeContents, returnReasoningContents, subGraph, instruction, config)));
 			this.subGraph = subGraph;
 		}
 
 		@Override
 		public StateGraph subGraph() {
 			return subGraph.stateGraph;
+		}
+
+		@Override
+		public Map<String, KeyStrategy> keyStrategies() {
+			return subGraph.getKeyStrategyMap();
 		}
 	}
 }

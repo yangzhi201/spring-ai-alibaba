@@ -41,7 +41,11 @@ import java.util.Map;
 public class SpringAIJacksonStateSerializer extends JacksonStateSerializer {
 
 	public SpringAIJacksonStateSerializer(AgentStateFactory<OverAllState> stateFactory) {
-		super(stateFactory);
+		this(stateFactory, new ObjectMapper());
+	}
+
+	public SpringAIJacksonStateSerializer(AgentStateFactory<OverAllState> stateFactory, ObjectMapper objectMapper) {
+		super(stateFactory, objectMapper);
 
 		var module = new SimpleModule();
 
@@ -70,6 +74,21 @@ public class SpringAIJacksonStateSerializer extends JacksonStateSerializer {
 						|| t.isTypeOrSubTypeOf(Collection.class) || t.isArrayType()) {
 					return false;
 				}
+
+				// Skip non-static inner classes, local classes, and anonymous classes
+				// They cannot be deserialized by Jackson because they require an outer class instance
+				Class<?> rawClass = t.getRawClass();
+				if (rawClass != null) {
+					// Non-static inner class
+					if (rawClass.isMemberClass() && !java.lang.reflect.Modifier.isStatic(rawClass.getModifiers())) {
+						return false;
+					}
+					// Local class or anonymous class
+					if (rawClass.isLocalClass() || rawClass.isAnonymousClass()) {
+						return false;
+					}
+				}
+
 				return super.useForType(t);
 			}
 		};
