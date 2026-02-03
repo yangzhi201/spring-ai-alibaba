@@ -103,10 +103,10 @@ public class GraphRunnerContext {
 			// RESUME FORM SUBGRAPH DETECTED
 			this.config = RunnableConfig.builder(config)
 					.checkPointId(null) // Reset checkpoint id
-					.clearContext()
 					.addMetadata(resumableAction.getResumeSubGraphId(), true) // add metadata for
 					// sub graph
 					.build();
+			this.config.clearContext();
 		} else {
 			// Reset checkpoint id
 			this.config = config.withCheckPointId(null);
@@ -220,7 +220,7 @@ public class GraphRunnerContext {
 				// The ConditionalParallelNode will handle the MultiCommand internally
 				return new Command(conditionalParallelNodeId, state);
 			} else {
-				// Single Command action (original logic)
+				// Single Command action
 				var singleAction = edgeCondition.singleAction();
 				var command = singleAction.apply(this.overallState, config).get();
 				

@@ -44,7 +44,7 @@ public class FlowGraphBuilder {
 	 * @throws GraphStateException if graph construction fails
 	 */
 	public static StateGraph buildGraph(String strategyType, FlowGraphConfig config) throws GraphStateException {
-		FlowGraphBuildingStrategy strategy = FlowGraphBuildingStrategyRegistry.getInstance().getStrategy(strategyType);
+		FlowGraphBuildingStrategy strategy = FlowGraphBuildingStrategyRegistry.getInstance().createStrategy(strategyType);
 		strategy.validateConfig(config);
 		return strategy.buildGraph(config);
 	}
@@ -59,6 +59,8 @@ public class FlowGraphBuilder {
 		private KeyStrategyFactory keyStrategyFactory;
 
 		private Agent rootAgent;
+
+		private Agent mainAgent;
 
 		private List<Agent> subAgents;
 
@@ -91,6 +93,14 @@ public class FlowGraphBuilder {
 
 		public void setStateSerializer(StateSerializer stateSerializer) {
 			this.stateSerializer = stateSerializer;
+		}
+
+		public Agent getMainAgent() {
+			return mainAgent;
+		}
+
+		public void setMainAgent(Agent mainAgent) {
+			this.mainAgent = mainAgent;
 		}
 
 		public Agent getRootAgent() {
@@ -150,6 +160,17 @@ public class FlowGraphBuilder {
 
 		public FlowGraphConfig rootAgent(Agent agent) {
 			this.rootAgent = agent;
+			return this;
+		}
+
+		/**
+		 * Sets the main agent (e.g. ReactAgent) for supervisor flow. When set, routing
+		 * decisions are taken from this agent's output instead of the built-in LLM.
+		 * @param agent the main agent instance
+		 * @return this config instance for method chaining
+		 */
+		public FlowGraphConfig mainAgent(Agent agent) {
+			this.mainAgent = agent;
 			return this;
 		}
 
